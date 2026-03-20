@@ -13,10 +13,27 @@ const dayOrder = [
 ];
 
 type DinnerState = Record<string, string>;
-
 type DraftState = Record<string, string>;
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+type StatusState = Record<string, SaveStatus>;
+
+/** Returns a map of day name -> ISO date (YYYY-MM-DD) for the current week (Mon–Sun). */
+function getWeekDates(): Record<string, string> {
+  const today = new Date();
+  const dow = today.getDay(); // 0 = Sun
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - ((dow + 6) % 7));
+  return dayOrder.reduce<Record<string, string>>((acc, day, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    acc[day] = d.toISOString().slice(0, 10);
+    return acc;
+  }, {});
+}
 
 export default function Home() {
+  const weekDates = useMemo(() => getWeekDates(), []);
+
   const initialDinner = useMemo(() => {
     return dayOrder.reduce<DinnerState>((acc, day) => {
       acc[day] = "";
@@ -24,10 +41,36 @@ export default function Home() {
     }, {});
   }, []);
 
+  const initialStatus = useMemo(() => {
+    return dayOrder.reduce<StatusState>((acc, day) => {
+      acc[day] = "idle";
+      return acc;
+    }, {});
+  }, []);
+
   const [dinners, setDinners] = useState<DinnerState>(initialDinner);
   const [drafts, setDrafts] = useState<DraftState>(initialDinner);
+  const [statuses, setStatuses] = useState<StatusState>(initialStatus);
   const [highlightDay, setHighlightDay] = useState<string>("Friday");
   const [isDark, setIsDark] = useState(false);
+
+  // Load current week's saved dinners on mount
+  useEffect(() => {
+    const monday = weekDates["Monday"];
+    fetch(`/api/dinner/week/${monday}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (!Array.isArray(data)) return;
+        const loaded: DinnerState = {};
+        data.forEach(({ date, item }: { date: string; item: string | null }) => {
+          const day = dayOrder.find((d) => weekDates[d] === date);
+          if (day) loaded[day] = item ?? "";
+        });
+        setDinners((prev) => ({ ...prev, ...loaded }));
+        setDrafts((prev) => ({ ...prev, ...loaded }));
+      })
+      .catch(() => {/* silently ignore on load */});
+  }, [weekDates]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -38,12 +81,28 @@ export default function Home() {
     }
   }, [isDark]);
 
-  const handleSubmit = (day: string) => {
-    const nextValue = drafts[day]?.trim();
-    setDinners((prev) => ({
-      ...prev,
-      [day]: nextValue
-    }));
+  const handleSubmit = async (day: string) => {
+    const item = drafts[day]?.trim();
+    if (!item) return;
+
+    setStatuses((prev) => ({ ...prev, [day]: "saving" }));
+
+    try {
+      const res = await fetch(`/api/dinner/${weekDates[day]}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item })
+      });
+
+      if (!res.ok) throw new Error("Failed to save");
+
+      setDinners((prev) => ({ ...prev, [day]: item }));
+      setStatuses((prev) => ({ ...prev, [day]: "saved" }));
+      setTimeout(() => setStatuses((prev) => ({ ...prev, [day]: "idle" })), 2000);
+    } catch {
+      setStatuses((prev) => ({ ...prev, [day]: "error" }));
+      setTimeout(() => setStatuses((prev) => ({ ...prev, [day]: "idle" })), 3000);
+    }
   };
 
   return (
@@ -126,9 +185,22 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => handleSubmit(day)}
-                          className="rounded-full bg-clay px-4 py-2 text-sm font-semibold text-white transition hover:bg-clay/90"
+                          disabled={statuses[day] === "saving"}
+                          className={`rounded-full px-4 py-2 text-sm font-semibold text-white transition disabled:opacity-60 ${
+                            statuses[day] === "saved"
+                              ? "bg-clover"
+                              : statuses[day] === "error"
+                              ? "bg-red-500"
+                              : "bg-clay hover:bg-clay/90"
+                          }`}
                         >
-                          Save dinner
+                          {statuses[day] === "saving"
+                            ? "Saving..."
+                            : statuses[day] === "saved"
+                            ? "Saved"
+                            : statuses[day] === "error"
+                            ? "Failed"
+                            : "Save dinner"}
                         </button>
                         <button
                           type="button"
